@@ -1,0 +1,208 @@
+# 图像识别基础功能整合版
+# 在Google Colab中运行此代码
+
+# 1. 安装必要的库
+!pip install torch torchvision pillow requests matplotlib
+
+# 2. 导入所需库
+import torch
+import torchvision.transforms as transforms
+from torchvision import models
+from PIL import Image
+import requests
+from io import BytesIO
+import matplotlib.pyplot as plt
+import numpy as np
+from google.colab import files
+import os
+from collections import defaultdict
+import shutil
+
+# 3. 设置设备（使用GPU如果可用）
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"使用设备: {device}")
+
+# 4. 加载预训练模型和标签
+def load_model():
+    # 使用ResNet50预训练模型
+    model = models.resnet50(pretrained=True)
+    model.eval()  # 设置为评估模式
+    model.to(device)
+    
+    # 下载ImageNet类别标签
+    labels_url = "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
+    response = requests.get(labels_url)
+    labels = response.text.split("\n")
+    
+    return model, labels
+
+model, class_labels = load_model()
+print("模型加载完成!")
+
+# 5. 图像预处理函数
+def preprocess_image(image):
+    # 定义图像预处理转换
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    
+    # 应用预处理
+    input_tensor = preprocess(image)
+    # 添加批次维度
+    input_batch = input_tensor.unsqueeze(0)
+    
+    return input_batch.to(device)
+
+# 6. 预测函数
+def predict_image(image, topk=5):
+    # 预处理图像
+    input_batch = preprocess_image(image)
+    
+    # 使用模型进行预测
+    with torch.no_grad():
+        output = model(input_batch)
+    
+    # 应用softmax获取概率
+    probabilities = torch.nn.functional.softmax(output[0], dim=0)
+    
+    # 获取topk个最可能的类别
+    top_prob, top_catid = torch.topk(probabilities, topk)
+    
+    # 转换为可读结果
+    results = []
+    for i in range(top_prob.size(0)):
+        class_name = class_labels[top_catid[i].item()]
+        confidence = top_prob[i].item()
+        results.append((class_name, confidence))
+    
+    return results
+
+# 7. 显示图像和预测结果
+def display_prediction(image_path, predictions):
+    # 打开图像
+    image = Image.open(image_path)
+    
+    # 创建图表
+    plt.figure(figsize=(10, 5))
+    
+    # 显示图像
+    plt.subplot(1, 2, 1)
+    plt.imshow(image)
+    plt.axis('off')
+    plt.title('输入图像')
+    
+    # 显示预测结果
+    plt.subplot(1, 2, 2)
+    classes = [p[0] for p in predictions]
+    confidences = [p[1] for p in predictions]
+    y_pos = np.arange(len(classes))
+    
+    plt.barh(y_pos, confidences, align='center')
+    plt.yticks(y_pos, classes)
+    plt.xlabel('置信度')
+    plt.title('预测结果')
+    plt.xlim(0, 1)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 打印详细结果
+    print("预测结果详情:")
+    for i, (class_name, confidence) in enumerate(predictions, 1):
+        print(f"{i}. {class_name}: {confidence:.4f}")
+
+# 8. 智能相册分类器
+class SmartPhotoAlbum:
+    def __init__(self):
+        self.categories = {
+            'animal': ['dog', 'cat', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'],
+            'food': ['apple', 'orange', 'banana', 'strawberry', 'carrot', 'hot dog', 'pizza', 'donut', 'cake'],
+            'vehicle': ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'train', 'boat', 'airplane'],
+            'person': ['person', 'man', 'woman', 'boy', 'girl'],
+            'electronic': ['cell phone', 'laptop', 'keyboard', 'mouse', 'monitor', 'television', 'remote'],
+            'other': []  # 其他类别
+        }
+        
+        # 创建反向映射：类别标签到分类
+        self.label_to_category = {}
+        for category, labels in self.categories.items():
+            for label in labels:
+                self.label_to_category[label] = category
+        
+        # 创建相册目录
+        for category in self.categories.keys():
+            os.makedirs(f'/content/albums/{category}', exist_ok=True)
+    
+    def categorize_image(self, image_path):
+        """对单张图像进行分类并归入相应相册"""
+        image = Image.open(image_path)
+        predictions = predict_image(image, topk=3)
+        
+        # 获取最可能的类别
+        primary_label = predictions[0][0].lower()
+        
+        # 确定分类
+        category = 'other'
+        for cat_label in self.label_to_category:
+            if cat_label in primary_label:
+                category = self.label_to_category[cat_label]
+                break
+        
+        # 复制图像到相册目录
+        filename = os.path.basename(image_path)
+        dest_path = f'/content/albums/{category}/{filename}'
+        shutil.copy(image_path, dest_path)
+        
+        return category, primary_label, predictions[0][1]
+
+# 9. 主函数 - 整合所有功能
+def main():
+    # 创建相册管理器
+    album_manager = SmartPhotoAlbum()
+    
+    # 上传图像
+    print("请上传一张或多张图片进行识别和分类...")
+    uploaded = files.upload()
+    
+    if not uploaded:
+        print("没有上传任何文件!")
+        return
+    
+    # 处理每张上传的图片
+    for filename in uploaded.keys():
+        print(f"\n处理图片: {filename}")
+        
+        # 显示图像和预测结果
+        image = Image.open(filename)
+        predictions = predict_image(image)
+        display_prediction(filename, predictions)
+        
+        # 分类到相册
+        category, label, confidence = album_manager.categorize_image(filename)
+        print(f"图片已分类到 '{category}' 相册 (识别为: {label}, 置信度: {confidence:.2f})")
+    
+    # 显示分类统计
+    print("\n=== 相册分类统计 ===")
+    for category in album_manager.categories.keys():
+        count = len(os.listdir(f'/content/albums/{category}'))
+        print(f"{category}: {count} 张图片")
+    
+    # 创建简单的可视化
+    categories = list(album_manager.categories.keys())
+    counts = [len(os.listdir(f'/content/albums/{category}')) for category in categories]
+    
+    plt.figure(figsize=(10, 6))
+    plt.bar(categories, counts)
+    plt.title('各相册图片数量')
+    plt.xlabel('相册类别')
+    plt.ylabel('图片数量')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# 10. 运行主程序
+if __name__ == "__main__":
+    main()
